@@ -1,33 +1,53 @@
-
 import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
+import time
+from datetime import datetime, timezone
 
 st.set_page_config(
-    page_title="REAL + OTC Signal Dashboard",
-    page_icon="📊",
+    page_title="REAL + OTC Signal Bot",
+    page_icon="🤖",
     layout="wide"
 )
 
-st.title("REAL + OTC SIGNAL DASHBOARD")
-st.caption("Analysis only | Auto Trading Disabled | Paper Test Mode")
+st.title("🤖 REAL + OTC SIGNAL BOT")
+st.caption("Analysis only | Auto Trading Disabled | Demo/Paper Testing")
 
-# =========================
+# =========================================================
 # SETTINGS
-# =========================
+# =========================================================
 
 OTCHARTS_API_KEY = st.secrets.get("OTCHARTS_API_KEY", "")
 
 REAL_PAIRS = [
-    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD",
-    "USDCAD", "USDCHF", "EURGBP", "EURJPY"
+    "EURUSD",
+    "GBPUSD",
+    "USDJPY",
+    "AUDUSD",
+    "USDCAD",
+    "USDCHF",
+    "EURGBP",
+    "EURJPY",
+    "NZDUSD",
+    "EURCHF",
+    "GBPJPY",
+    "AUDJPY",
+    "EURAUD",
+    "GBPAUD",
+    "CADJPY",
+    "CHFJPY"
 ]
 
-OTC_DEFAULT = [
+OTC_PAIRS = [
     "EURUSD_otc",
     "GBPUSD_otc",
     "USDJPY_otc",
+    "AUDUSD_otc",
+    "USDCAD_otc",
+    "USDCHF_otc",
+    "EURGBP_otc",
+    "EURJPY_otc",
     "BTCUSD_otc"
 ]
 
@@ -40,11 +60,26 @@ TIMEFRAMES = {
     "4 Hours": 14400
 }
 
-# =========================
-# INDICATORS
-# =========================
+# =========================================================
+# SESSION MEMORY
+# =========================================================
+
+if "last_signal" not in st.session_state:
+    st.session_state.last_signal = None
+
+if "signal_history" not in st.session_state:
+    st.session_state.signal_history = []
+
+if "last_signal_time" not in st.session_state:
+    st.session_state.last_signal_time = None
+
+
+# =========================================================
+# RSI
+# =========================================================
 
 def calculate_rsi(series, period=14):
+
     delta = series.diff()
 
     gain = delta.clip(lower=0)
@@ -54,68 +89,102 @@ def calculate_rsi(series, period=14):
     avg_loss = loss.rolling(period).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
 
-    return rsi
+    return 100 - (100 / (1 + rs))
 
+
+# =========================================================
+# SIGNAL ENGINE
+# =========================================================
 
 def make_signal(df):
 
     df = df.copy()
 
-    df["EMA9"] = df["close"].ewm(span=9, adjust=False).mean()
-    df["EMA21"] = df["close"].ewm(span=21, adjust=False).mean()
-    df["EMA50"] = df["close"].ewm(span=50, adjust=False).mean()
-    df["RSI"] = calculate_rsi(df["close"])
+    for col in ["open", "high", "low", "close"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            )
 
-    df = df.dropna()
+    df = df.dropna(
+        subset=["open", "high", "low", "close"]
+    )
+
+    df["EMA9"] = df["close"].ewm(
+        span=9,
+        adjust=False
+    ).mean()
+
+    df["EMA21"] = df["close"].ewm(
+        span=21,
+        adjust=False
+    ).mean()
+
+    df["EMA50"] = df["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    df["RSI"] = calculate_rsi(
+        df["close"]
+    )
+
+    df = df.dropna().reset_index(drop=True)
 
     if len(df) < 30:
+
         return {
             "signal": "WAIT",
             "score": 0,
-            "price": float(df.iloc[-1]["close"]),
-            "rsi": 0
+            "price": 0,
+            "rsi": 0,
+            "ema9": 0,
+            "ema21": 0,
+            "ema50": 0
         }
 
     last = df.iloc[-1]
 
-    score_call = 0
-    score_put = 0
+    call = 0
+    put = 0
 
     # EMA 9 / 21
     if last["EMA9"] > last["EMA21"]:
-        score_call += 2
+        call += 2
     elif last["EMA9"] < last["EMA21"]:
-        score_put += 2
+        put += 2
 
     # EMA 21 / 50
     if last["EMA21"] > last["EMA50"]:
-        score_call += 2
+        call += 2
     elif last["EMA21"] < last["EMA50"]:
-        score_put += 2
+        put += 2
 
     # RSI
     if last["RSI"] >= 55:
-        score_call += 2
+        call += 2
     elif last["RSI"] <= 45:
-        score_put += 2
+        put += 2
 
     # Candle direction
     if last["close"] > last["open"]:
-        score_call += 1
+        call += 1
     elif last["close"] < last["open"]:
-        score_put += 1
+        put += 1
 
-    if score_call > score_put and score_call >= 5:
+    if call > put and call >= 5:
         signal = "CALL"
-        score = score_call
-    elif score_put > score_call and score_put >= 5:
+        score = call
+
+    elif put > call and put >= 5:
         signal = "PUT"
-        score = score_put
+        score = put
+
     else:
         signal = "WAIT"
-        score = max(score_call, score_put)
+        score = max(call, put)
 
     return {
         "signal": signal,
@@ -128,11 +197,29 @@ def make_signal(df):
     }
 
 
-# =========================
-# REAL DATA
-# =========================
+# =========================================================
+# CANDLE COUNTDOWN
+# =========================================================
 
-@st.cache_data(ttl=30)
+def candle_countdown(seconds):
+
+    now = int(time.time())
+
+    remaining = seconds - (
+        now % seconds
+    )
+
+    if remaining == seconds:
+        remaining = 0
+
+    return remaining
+
+
+# =========================================================
+# REAL DATA
+# =========================================================
+
+@st.cache_data(ttl=10)
 def get_real_data(pair, timeframe_seconds):
 
     url = f"https://biquote.io/api/{pair}/ohlc"
@@ -141,7 +228,7 @@ def get_real_data(pair, timeframe_seconds):
         url,
         params={
             "interval": "1m",
-            "limit": 150
+            "limit": 200
         },
         timeout=20
     )
@@ -150,24 +237,35 @@ def get_real_data(pair, timeframe_seconds):
 
     data = response.json()
 
-    df = pd.DataFrame(data["bars"])
+    df = pd.DataFrame(
+        data.get("bars", [])
+    )
 
     if df.empty:
         return df
 
-    df["openTime"] = pd.to_datetime(df["openTime"], utc=True)
+    df["openTime"] = pd.to_datetime(
+        df["openTime"],
+        utc=True
+    )
 
-    df = df.sort_values("openTime").reset_index(drop=True)
+    df = df.sort_values(
+        "openTime"
+    ).reset_index(drop=True)
 
     if "isOpen" in df.columns:
-        df = df[df["isOpen"] == False].copy()
 
-    # Resample for selected timeframe
+        df = df[
+            df["isOpen"] == False
+        ].copy()
+
     if timeframe_seconds > 60:
 
         minutes = timeframe_seconds // 60
 
-        df = df.set_index("openTime")
+        df = df.set_index(
+            "openTime"
+        )
 
         df = df.resample(
             f"{minutes}min"
@@ -181,19 +279,24 @@ def get_real_data(pair, timeframe_seconds):
     return df
 
 
-# =========================
+# =========================================================
 # OTC DATA
-# =========================
+# =========================================================
 
-def get_otc_data(pair, timeframe_seconds):
+def get_otc_data(
+    pair,
+    timeframe_seconds
+):
 
     if not OTCHARTS_API_KEY:
+
         return None, "OTCharts API key not configured"
 
     url = "https://otcharts.com/v1/candles"
 
     headers = {
-        "Authorization": f"Bearer {OTCHARTS_API_KEY}"
+        "Authorization":
+        f"Bearer {OTCHARTS_API_KEY}"
     }
 
     response = requests.get(
@@ -202,40 +305,113 @@ def get_otc_data(pair, timeframe_seconds):
         params={
             "venue": "otc",
             "symbol": pair,
-            "timeframe": f"{timeframe_seconds}s",
-            "limit": 150
+            "timeframe":
+                f"{timeframe_seconds}s",
+            "limit": 200
         },
         timeout=20
     )
 
     if response.status_code != 200:
-        return None, response.text
+
+        return None, (
+            f"OTCharts HTTP "
+            f"{response.status_code}: "
+            f"{response.text[:300]}"
+        )
 
     data = response.json()
 
-    candles = data.get("candles", [])
+    candles = data.get(
+        "candles",
+        []
+    )
 
     if not candles:
-        return None, "No candles returned"
 
-    df = pd.DataFrame(candles)
+        return None, "No OTC candles returned"
 
-    # Handle possible column names
+    df = pd.DataFrame(
+        candles
+    )
+
+    # Normalize OHLC names
+
+    rename_map = {}
+
+    for c in df.columns:
+
+        name = str(c).lower()
+
+        if name == "open":
+            rename_map[c] = "open"
+
+        elif name == "high":
+            rename_map[c] = "high"
+
+        elif name == "low":
+            rename_map[c] = "low"
+
+        elif name == "close":
+            rename_map[c] = "close"
+
+    df = df.rename(
+        columns=rename_map
+    )
+
+    # Normalize time
+
     if "time" in df.columns:
-        df["time"] = pd.to_datetime(
-            df["time"],
-            unit="s",
-            utc=True
-        )
+
+        try:
+
+            df["time"] = pd.to_datetime(
+                df["time"],
+                unit="s",
+                utc=True
+            )
+
+        except:
+
+            df["time"] = pd.to_datetime(
+                df["time"],
+                utc=True,
+                errors="coerce"
+            )
+
+    for col in [
+        "open",
+        "high",
+        "low",
+        "close"
+    ]:
+
+        if col in df.columns:
+
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            )
+
+    df = df.dropna(
+        subset=[
+            "open",
+            "high",
+            "low",
+            "close"
+        ]
+    )
 
     return df, "OK"
 
 
-# =========================
+# =========================================================
 # SIDEBAR
-# =========================
+# =========================================================
 
-st.sidebar.header("Dashboard Settings")
+st.sidebar.header(
+    "⚙️ Bot Settings"
+)
 
 market = st.sidebar.selectbox(
     "Market",
@@ -245,33 +421,25 @@ market = st.sidebar.selectbox(
 if market == "REAL":
 
     pair = st.sidebar.selectbox(
-        "Pair",
+        "REAL Pair",
         REAL_PAIRS
-    )
-
-    timeframe_name = st.sidebar.selectbox(
-        "Candle Timeframe",
-        list(TIMEFRAMES.keys())
     )
 
 else:
 
     pair = st.sidebar.selectbox(
         "OTC Pair",
-        OTC_DEFAULT
+        OTC_PAIRS
     )
 
-    timeframe_name = st.sidebar.selectbox(
-        "Candle Timeframe",
-        [
-            "1 Minute",
-            "5 Minutes",
-            "15 Minutes",
-            "30 Minutes"
-        ]
-    )
+timeframe_name = st.sidebar.selectbox(
+    "Candle Timeframe",
+    list(TIMEFRAMES.keys())
+)
 
-timeframe_seconds = TIMEFRAMES[timeframe_name]
+timeframe_seconds = TIMEFRAMES[
+    timeframe_name
+]
 
 expiry = st.sidebar.selectbox(
     "Expiry",
@@ -282,190 +450,376 @@ expiry = st.sidebar.selectbox(
     ]
 )
 
-if st.sidebar.button("REFRESH DATA"):
+st.sidebar.divider()
+
+if st.sidebar.button(
+    "🔄 REFRESH DATA",
+    use_container_width=True
+):
+
     st.cache_data.clear()
     st.rerun()
 
 
-# =========================
-# MAIN
-# =========================
+# =========================================================
+# TOP INFO
+# =========================================================
 
 st.divider()
 
-col1, col2, col3, col4 = st.columns(4)
+c1, c2, c3, c4 = st.columns(4)
 
-col1.metric("MARKET", market)
-col2.metric("PAIR", pair)
-col3.metric("TIMEFRAME", timeframe_name)
-col4.metric("EXPIRY", expiry)
+c1.metric(
+    "MARKET",
+    market
+)
+
+c2.metric(
+    "PAIR",
+    pair
+)
+
+c3.metric(
+    "TIMEFRAME",
+    timeframe_name
+)
+
+c4.metric(
+    "EXPIRY",
+    expiry
+)
 
 st.divider()
 
-if market == "REAL":
 
-    try:
+# =========================================================
+# COUNTDOWN
+# =========================================================
 
-        df = get_real_data(
-            pair,
-            timeframe_seconds
-        )
+remaining = candle_countdown(
+    timeframe_seconds
+)
 
-        if df.empty:
-            st.error("No REAL market data received.")
-        else:
+mins = remaining // 60
+secs = remaining % 60
 
-            result = make_signal(df)
+st.subheader(
+    "⏱️ Current Candle"
+)
 
-            st.subheader("SIGNAL")
+count_col1, count_col2 = st.columns(2)
 
-            c1, c2, c3, c4 = st.columns(4)
+count_col1.metric(
+    "Candle closes in",
+    f"{mins:02d}:{secs:02d}"
+)
 
-            c1.metric(
-                "SIGNAL",
-                result["signal"]
-            )
+if remaining <= 5:
 
-            c2.metric(
-                "SCORE",
-                result["score"]
-            )
-
-            c3.metric(
-                "ENTRY",
-                f"{result['price']:.6f}"
-            )
-
-            c4.metric(
-                "RSI",
-                f"{result['rsi']:.2f}"
-            )
-
-            st.subheader("Price Chart")
-
-            chart_df = df.copy()
-
-            if "openTime" in chart_df.columns:
-                chart_df = chart_df.set_index("openTime")
-
-            st.line_chart(
-                chart_df["close"]
-            )
-
-            st.subheader("Latest Candles")
-
-            st.dataframe(
-                df.tail(20),
-                use_container_width=True
-            )
-
-    except Exception as e:
-
-        st.error(
-            f"REAL DATA ERROR: {e}"
-        )
+    count_col2.warning(
+        "Candle closing — prepare for next candle"
+    )
 
 else:
 
-    df, message = get_otc_data(
-        pair,
-        timeframe_seconds
+    count_col2.info(
+        "GET SIGNAL will prepare the next-candle setup."
     )
 
-    if df is None:
 
-        st.warning(
-            f"OTC DATA: {message}"
+# =========================================================
+# GET SIGNAL
+# =========================================================
+
+st.divider()
+
+st.subheader(
+    "🎯 Signal Generator"
+)
+
+if st.button(
+    "🚀 GET SIGNAL",
+    type="primary",
+    use_container_width=True
+):
+
+    with st.spinner(
+        "Getting latest candle data..."
+    ):
+
+        try:
+
+            if market == "REAL":
+
+                df = get_real_data(
+                    pair,
+                    timeframe_seconds
+                )
+
+                source_message = "REAL"
+
+            else:
+
+                df, source_message = get_otc_data(
+                    pair,
+                    timeframe_seconds
+                )
+
+            if df is None:
+
+                st.error(
+                    source_message
+                )
+
+            elif df.empty:
+
+                st.error(
+                    "No candle data received."
+                )
+
+            else:
+
+                result = make_signal(
+                    df
+                )
+
+                signal_time = datetime.now(
+                    timezone.utc
+                )
+
+                st.session_state.last_signal = {
+                    "market": market,
+                    "pair": pair,
+                    "timeframe": timeframe_name,
+                    "expiry": expiry,
+                    "signal": result["signal"],
+                    "score": result["score"],
+                    "price": result["price"],
+                    "rsi": result["rsi"],
+                    "time": signal_time
+                }
+
+                st.session_state.last_signal_time = signal_time
+
+                # Add to history
+
+                st.session_state.signal_history.insert(
+                    0,
+                    {
+                        "Time": signal_time.strftime(
+                            "%H:%M:%S UTC"
+                        ),
+                        "Market": market,
+                        "Pair": pair,
+                        "TF": timeframe_name,
+                        "Signal": result["signal"],
+                        "Score": result["score"],
+                        "Entry": round(
+                            result["price"],
+                            6
+                        )
+                    }
+                )
+
+                # Keep last 20
+
+                st.session_state.signal_history = (
+                    st.session_state.signal_history[:20]
+                )
+
+        except Exception as e:
+
+            st.error(
+                f"Signal error: {e}"
+            )
+
+
+# =========================================================
+# SHOW SIGNAL
+# =========================================================
+
+if st.session_state.last_signal:
+
+    signal = st.session_state.last_signal
+
+    st.divider()
+
+    st.subheader(
+        "📢 NEXT CANDLE SIGNAL"
+    )
+
+    s1, s2, s3, s4 = st.columns(4)
+
+    s1.metric(
+        "SIGNAL",
+        signal["signal"]
+    )
+
+    s2.metric(
+        "STRENGTH",
+        f"{signal['score']}/7"
+    )
+
+    s3.metric(
+        "ENTRY PRICE",
+        f"{signal['price']:.6f}"
+    )
+
+    s4.metric(
+        "RSI",
+        f"{signal['rsi']:.2f}"
+    )
+
+    if signal["signal"] == "CALL":
+
+        st.success(
+            "🟢 CALL — Next candle setup"
+        )
+
+    elif signal["signal"] == "PUT":
+
+        st.error(
+            "🔴 PUT — Next candle setup"
         )
 
     else:
 
-        # Normalize columns
-        rename_map = {}
-
-        for c in df.columns:
-            if c.lower() == "open":
-                rename_map[c] = "open"
-            elif c.lower() == "high":
-                rename_map[c] = "high"
-            elif c.lower() == "low":
-                rename_map[c] = "low"
-            elif c.lower() == "close":
-                rename_map[c] = "close"
-
-        df = df.rename(
-            columns=rename_map
+        st.warning(
+            "🟡 WAIT — No clear setup"
         )
 
-        required = [
-            "open",
-            "high",
-            "low",
-            "close"
-        ]
+    st.info(
+        f"Expiry selected: {signal['expiry']} | "
+        f"Signal generated from the latest completed candle."
+    )
 
-        if not all(
-            x in df.columns for x in required
-        ):
 
-            st.error(
-                "OTC candle format is not recognized."
+# =========================================================
+# LOAD DATA FOR CHART
+# =========================================================
+
+st.divider()
+
+st.subheader(
+    "📊 Market Chart"
+)
+
+try:
+
+    if market == "REAL":
+
+        chart_df = get_real_data(
+            pair,
+            timeframe_seconds
+        )
+
+    else:
+
+        chart_df, msg = get_otc_data(
+            pair,
+            timeframe_seconds
+        )
+
+    if chart_df is not None and not chart_df.empty:
+
+        if "time" in chart_df.columns:
+
+            display_df = chart_df.copy()
+
+            display_df["time"] = pd.to_datetime(
+                display_df["time"],
+                utc=True,
+                errors="coerce"
+            )
+
+            display_df = display_df.dropna(
+                subset=["time"]
+            )
+
+            chart_data = display_df.set_index(
+                "time"
+            )
+
+        elif "openTime" in chart_df.columns:
+
+            chart_data = chart_df.copy()
+
+            chart_data = chart_data.set_index(
+                "openTime"
             )
 
         else:
 
-            result = make_signal(df)
+            chart_data = chart_df.copy()
 
-            st.subheader("OTC SIGNAL")
+        if "close" in chart_data.columns:
 
-            c1, c2, c3, c4 = st.columns(4)
-
-            c1.metric(
-                "SIGNAL",
-                result["signal"]
+            st.line_chart(
+                chart_data["close"]
             )
 
-            c2.metric(
-                "SCORE",
-                result["score"]
-            )
+        st.subheader(
+            "Latest Candles"
+        )
 
-            c3.metric(
-                "ENTRY",
-                f"{result['price']:.6f}"
-            )
+        st.dataframe(
+            chart_df.tail(20),
+            use_container_width=True
+        )
 
-            c4.metric(
-                "RSI",
-                f"{result['rsi']:.2f}"
-            )
+    else:
 
-            st.subheader("OTC Price Chart")
+        st.warning(
+            "Chart data unavailable."
+        )
 
-            if "time" in df.columns:
-                chart_df = df.set_index("time")
-                st.line_chart(
-                    chart_df["close"]
-                )
-            else:
-                st.line_chart(
-                    df["close"]
-                )
+except Exception as e:
 
-            st.subheader("Latest OTC Candles")
+    st.warning(
+        f"Chart error: {e}"
+    )
 
-            st.dataframe(
-                df.tail(20),
-                use_container_width=True
-            )
 
+# =========================================================
+# SIGNAL HISTORY
+# =========================================================
+
+st.divider()
+
+st.subheader(
+    "🧾 Signal History"
+)
+
+if st.session_state.signal_history:
+
+    history_df = pd.DataFrame(
+        st.session_state.signal_history
+    )
+
+    st.dataframe(
+        history_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+
+    st.info(
+        "No signals generated yet."
+    )
+
+
+# =========================================================
+# FOOTER
+# =========================================================
 
 st.divider()
 
 st.success(
-    "SYSTEM READY | AUTO TRADING DISABLED | PAPER/ANALYSIS MODE"
+    "SYSTEM READY | AUTO TRADING DISABLED | PAPER / DEMO MODE"
 )
 
 st.caption(
-    "Signal score is a rule-based confirmation score, not a guaranteed probability."
+    "Signal strength is a rule-based confirmation score, "
+    "not a guaranteed probability or guaranteed trade result."
 )
