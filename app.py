@@ -60,6 +60,10 @@ defaults = {
     "otc_symbols": DEFAULT_OTC.copy(),
     "armed": False,
     "armed_candle": None,
+    "armed_market": None,
+    "armed_pair": None,
+    "armed_tf": None,
+    "armed_expiry": None,
     "last_signal": None,
     "last_signal_key": None,
     "history": [],
@@ -69,11 +73,13 @@ for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
+
 # =========================================================
 # CLIENT
 # =========================================================
 
 def get_client():
+
     if st.session_state.client is None:
 
         if Client is None:
@@ -191,7 +197,11 @@ def normalize_bars(bars):
                 getattr(
                     b,
                     "openTime",
-                    None
+                    getattr(
+                        b,
+                        "timestamp",
+                        None
+                    )
                 )
             )
 
@@ -286,16 +296,17 @@ def normalize_bars(bars):
         rows
     )
 
-    df = df.drop_duplicates(
-        subset=["time"]
-    )
-
-    df = df.sort_values(
-        "time"
-    )
-
-    df = df.reset_index(
-        drop=True
+    df = (
+        df
+        .drop_duplicates(
+            subset=["time"]
+        )
+        .sort_values(
+            "time"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
     return df
@@ -329,11 +340,9 @@ def fetch_bars(
         limit=limit
     )
 
-    df = normalize_bars(
+    return normalize_bars(
         bars
     )
-
-    return df
 
 
 # =========================================================
@@ -607,6 +616,7 @@ def generate_signal(
         )
 
     # Remove current running candle.
+
     if len(df) > 1:
 
         df = df.iloc[:-1].copy()
@@ -622,11 +632,13 @@ def generate_signal(
             message
         )
 
-    result["market"] = market
-
-    result["pair"] = pair
-
-    result["timeframe"] = tf_name
+    result.update(
+        {
+            "market": market,
+            "pair": pair,
+            "timeframe": tf_name,
+        }
+    )
 
     return (
         result,
@@ -818,6 +830,7 @@ st.sidebar.caption(
     "Analysis/signals only — no automatic trading."
 )
 
+
 # =========================================================
 # HEADER
 # =========================================================
@@ -829,6 +842,7 @@ st.title(
 st.caption(
     "Completed-candle analysis only. No auto-trading."
 )
+
 
 # =========================================================
 # LIVE CLOCK
@@ -854,13 +868,15 @@ def clock_fragment():
         f"Next candle in {remaining}s"
     )
 
+    total = TF_SECONDS[candle_tf]
+
     progress = (
         1
         -
         (
             remaining
             /
-            TF_SECONDS[candle_tf]
+            total
         )
     )
 
@@ -878,6 +894,7 @@ def clock_fragment():
 
 
 clock_fragment()
+
 
 # =========================================================
 # MARKET INFO
@@ -905,6 +922,7 @@ col4.metric(
     f"{expiry} min"
 )
 
+
 # =========================================================
 # ARM SIGNAL
 # =========================================================
@@ -930,9 +948,6 @@ if st.button(
         candle_tf
     )
 
-    # If candle is almost closed,
-    # use the next candle.
-
     if remaining <= 2:
 
         target = current_end
@@ -945,6 +960,16 @@ if st.button(
 
     st.session_state.armed_candle = target
 
+    # Save the exact settings used for this signal.
+
+    st.session_state.armed_market = market
+
+    st.session_state.armed_pair = pair
+
+    st.session_state.armed_tf = candle_tf
+
+    st.session_state.armed_expiry = expiry
+
     st.session_state.last_signal = None
 
     st.session_state.last_signal_key = None
@@ -954,6 +979,7 @@ if st.button(
         f"after candle {fmt_time(target)} closes."
     )
 
+
 if st.session_state.armed:
 
     st.info(
@@ -961,6 +987,7 @@ if st.session_state.armed:
         "candle to complete. The running candle "
         "is NOT used for the signal."
     )
+
 
 # =========================================================
 # AUTOMATIC SIGNAL
@@ -979,7 +1006,28 @@ def automatic_signal_fragment():
         st.session_state.armed_candle
     )
 
-    if target is None:
+    armed_market = (
+        st.session_state.armed_market
+    )
+
+    armed_pair = (
+        st.session_state.armed_pair
+    )
+
+    armed_tf = (
+        st.session_state.armed_tf
+    )
+
+    armed_expiry = (
+        st.session_state.armed_expiry
+    )
+
+    if (
+        target is None
+        or armed_market is None
+        or armed_pair is None
+        or armed_tf is None
+    ):
 
         return
 
@@ -991,16 +1039,21 @@ def automatic_signal_fragment():
         target
         +
         timedelta(
-            seconds=TF_SECONDS[candle_tf]
+            seconds=TF_SECONDS[armed_tf]
         )
     )
 
     if now < close_time:
 
-        remaining = int(
-            (
-                close_time - now
-            ).total_seconds()
+        remaining = max(
+            0,
+            int(
+                (
+                    close_time
+                    -
+                    now
+                ).total_seconds()
+            )
         )
 
         st.info(
@@ -1010,11 +1063,27 @@ def automatic_signal_fragment():
 
         return
 
-    result, message = generate_signal(
-        market,
-        pair,
-        candle_tf
-    )
+    # Fetch signal after candle closes.
+
+    try:
+
+        result, message = generate_signal(
+            armed_market,
+            armed_pair,
+            armed_tf
+        )
+
+    except Exception as e:
+
+        st.warning(
+            "⏳ Waiting for candle data..."
+        )
+
+        st.caption(
+            str(e)
+        )
+
+        return
 
     if result is None:
 
@@ -1029,9 +1098,9 @@ def automatic_signal_fragment():
         return
 
     source_key = (
-        f"{market}|"
-        f"{pair}|"
-        f"{candle_tf}|"
+        f"{armed_market}|"
+        f"{armed_pair}|"
+        f"{armed_tf}|"
         f"{pd.Timestamp(result['candle_time']).isoformat()}"
     )
 
@@ -1084,7 +1153,7 @@ def automatic_signal_fragment():
         st.success(
             f"🟢 CALL | {result['pair']} | "
             f"Strength {result['strength']}% | "
-            f"Expiry {expiry}m"
+            f"Expiry {armed_expiry}m"
         )
 
     elif result["direction"] == "PUT":
@@ -1092,7 +1161,7 @@ def automatic_signal_fragment():
         st.error(
             f"🔴 PUT | {result['pair']} | "
             f"Strength {result['strength']}% | "
-            f"Expiry {expiry}m"
+            f"Expiry {armed_expiry}m"
         )
 
     else:
@@ -1108,7 +1177,8 @@ def automatic_signal_fragment():
 
     st.write(
         "Completed candle: "
-        + fmt_time(
+        +
+        fmt_time(
             completed_time
         )
     )
@@ -1131,87 +1201,6 @@ def automatic_signal_fragment():
 
 automatic_signal_fragment()
 
-# =========================================================
-# LAST SIGNAL
-# =========================================================
-
-st.divider()
-
-st.subheader(
-    "📌 Last Signal"
-)
-
-if st.session_state.last_signal is None:
-
-    st.info(
-        "No signal yet. Press "
-        "ARM NEXT-CANDLE SIGNAL."
-    )
-
-else:
-
-    r = (
-        st.session_state.last_signal
-    )
-
-    a, b, c, d = st.columns(4)
-
-    a.metric(
-        "Signal",
-        r["direction"]
-    )
-
-    b.metric(
-        "Strength",
-        f"{r['strength']}%"
-    )
-
-    c.metric(
-        "Score",
-        r["score"]
-    )
-
-    d.metric(
-        "RSI",
-        (
-            f"{r['rsi']:.2f}"
-            if r["rsi"] is not None
-            else "N/A"
-        )
-    )
 
 # =========================================================
-# CHART
-# =========================================================
-
-st.divider()
-
-st.subheader(
-    "📊 Chart"
-)
-
-try:
-
-    chart_df = fetch_bars(
-        market,
-        pair,
-        chart_tf,
-        120
-    )
-
-    if not chart_df.empty:
-
-        st.line_chart(
-            chart_df.set_index(
-                "time"
-            )["close"],
-            height=350
-        )
-
-    else:
-
-        st.warning(
-            "No chart data available."
-        )
-
-except Exception as
+# LAS
