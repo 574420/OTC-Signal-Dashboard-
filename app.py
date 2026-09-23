@@ -1258,47 +1258,29 @@ if st.session_state.armed:
 # AUTOMATIC NEXT-CANDLE SIGNAL
 # =========================================================
 
-@st.fragment(
-    run_every="1s"
-)
+@st.fragment(run_every="1s")
 def automatic_signal_fragment():
 
     if not st.session_state.armed:
-
         return
 
-
-    armed_candle = (
-        st.session_state.armed_candle
-    )
-
+    armed_candle = st.session_state.armed_candle
 
     if armed_candle is None:
-
         return
 
-
-    now = datetime.now(
-        timezone.utc
-    )
-
+    now = datetime.now(timezone.utc)
 
     candle_close = (
         armed_candle
-        + timedelta(
-            seconds=candle_seconds
-        )
+        + timedelta(seconds=candle_seconds)
     )
 
-
-        # Wait until the exact armed candle closes
+    # Wait until armed candle closes
     if now < candle_close:
         return
 
-    # -----------------------------------------
-    # Small provider-delay protection
-    # -----------------------------------------
-
+    # Generate signal
     result, message = generate_next_signal(
         market,
         pair,
@@ -1307,8 +1289,101 @@ def automatic_signal_fragment():
         expiry
     )
 
+    # Provider has not returned candle yet
     if result is None:
         st.warning(
             "⏳ Waiting for completed candle data..."
         )
         return
+
+    # -----------------------------------------
+    # SAVE SIGNAL
+    # -----------------------------------------
+
+    source_candle = result["source_candle_time"]
+
+    signal_time = datetime.now(timezone.utc)
+
+    st.session_state.last_signal = {
+        "market": market,
+        "pair": pair,
+        "timeframe": candle_timeframe_name,
+        "expiry": expiry,
+        "signal": result["signal"],
+        "score": result["score"],
+        "price": result["price"],
+        "rsi": result["rsi"],
+        "ema9": result["ema9"],
+        "ema21": result["ema21"],
+        "ema50": result["ema50"],
+        "source_candle": source_candle,
+        "next_candle": result["next_candle_start"],
+        "time": signal_time
+    }
+
+    st.session_state.last_signal_time = signal_time
+
+    # Stop waiting
+    st.session_state.armed = False
+    st.session_state.armed_candle = None
+
+    # -----------------------------------------
+    # SHOW SIGNAL
+    # -----------------------------------------
+
+    st.divider()
+
+    st.subheader("📢 NEXT CANDLE SIGNAL")
+
+    signal = result["signal"]
+
+    if signal == "CALL":
+        st.success("🟢 CALL — UP")
+    elif signal == "PUT":
+        st.error("🔴 PUT — DOWN")
+    else:
+        st.warning("🟡 WAIT")
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "SIGNAL",
+        signal
+    )
+
+    c2.metric(
+        "STRENGTH",
+        f'{result["score"]}/7'
+    )
+
+    c3.metric(
+        "ENTRY",
+        f'{result["price"]:.6f}'
+    )
+
+    c4.metric(
+        "RSI",
+        f'{result["rsi"]:.2f}'
+    )
+
+    st.write(
+        "**Analyzed Candle:** "
+        f'{candle_label(source_candle)}'
+    )
+
+    st.write(
+        "**Next Candle:** "
+        f'{candle_label(result["next_candle_start"])}'
+    )
+
+    st.write(
+        f"**Expiry:** {expiry}"
+    )
+
+    st.caption(
+        "Signal is based on the completed candle. "
+        "Auto trading is disabled."
+    )
+
+
+automatic_signal_fragment()
