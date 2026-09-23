@@ -1297,7 +1297,7 @@ def automatic_signal_fragment():
         return
 
 
-    # -----------------------------------------
+        # -----------------------------------------
     # Small provider-delay protection
     # -----------------------------------------
 
@@ -1309,8 +1309,8 @@ def automatic_signal_fragment():
         expiry
     )
 
-
     if result is None:
-
         st.warning(
-  
+            "⏳ Waiting for completed candle data..."
+        )
+        return
