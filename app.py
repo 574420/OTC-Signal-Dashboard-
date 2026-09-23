@@ -1291,13 +1291,11 @@ def automatic_signal_fragment():
     )
 
 
-    # Wait until the exact armed candle closes
+        # Wait until the exact armed candle closes
     if now < candle_close:
-
         return
 
-
-        # -----------------------------------------
+    # -----------------------------------------
     # Small provider-delay protection
     # -----------------------------------------
 
